@@ -26,7 +26,11 @@ Opens the TUI where you can add remote connections manually.
 
 ## Jump Mode
 
-Type `/` followed by a path to jump directly to any location. As you type, lazywire performs a real-time fuzzy search across the filesystem — works on both local and remote panes.
+Press `/` and type a path to jump directly to any location — works like `cd` with real-time path matching as you type.
+
+## Fuzzy Find
+
+Press `f` to fuzzy search recursively within the currently open directory.
 
 ## File Operations
 
