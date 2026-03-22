@@ -17,10 +17,32 @@ struct ConnectOverlay {
     std::string error;
 };
 
+struct ConfirmOverlay {
+    bool active = false;
+    std::string message;
+    std::function<void()> on_confirm;
+};
+
+struct MkdirOverlay {
+    bool active = false;
+    std::string parent_path;
+    std::string name;
+    bool is_remote = false;
+    std::shared_ptr<SshSession> session;
+};
+
+struct RenameOverlay {
+    bool active = false;
+    std::string original_path;
+    std::string new_name;
+    bool is_remote = false;
+    std::shared_ptr<SshSession> session; // null = local
+};
+
 struct QueuedOp {
-    enum class Type { Copy, Move, Delete } type;
+    enum class Type { Copy, Move, Delete, Rename, Mkdir } type;
     std::string src;
-    std::string dst; // empty for Delete
+    std::string dst;      // empty for Delete; new_name for Rename
     std::shared_ptr<SshSession> src_session; // null = local
     std::shared_ptr<SshSession> dst_session; // null = local
 };
@@ -46,11 +68,16 @@ public:
 private:
     std::vector<PaneState> panes_;
     int active_pane_ = 0;
+    std::string start_path_;
     ClipboardEntry clipboard_;
     bool clipboard_active_ = false;
     std::vector<QueuedOp> op_queue_;
+    bool batch_mode_ = false;
     std::string last_error_;
     ConnectOverlay overlay_;
+    RenameOverlay rename_overlay_;
+    MkdirOverlay mkdir_overlay_;
+    ConfirmOverlay confirm_overlay_;
     std::atomic<bool> loading_{false};
     std::atomic<bool> loading_cancelled_{false};
     std::string loading_msg_;

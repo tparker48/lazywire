@@ -36,11 +36,12 @@ Press `f` to fuzzy search recursively within the currently open directory.
 
 | Key | Action |
 |-----|--------|
-| `c` | Copy |
+| `y` | Yank (copy) |
 | `x` | Cut |
 | `p` | Paste (into selected folder, or same level if a file is selected) |
-| `d` | Delete |
+| `D` | Delete |
 | `r` | Rename |
+| `R` | Refresh pane |
 
 Operations work across panes — copy from local, paste to remote, and vice versa.
 

@@ -129,8 +129,20 @@ bool FileOps::delete_remote(SshSession& session, const std::string& path) {
 }
 
 bool FileOps::rename_remote(SshSession& session, const std::string& path, const std::string& new_name) {
-    // TODO: sftp_rename
-    return false;
+    fs::path p(path);
+    std::string new_path = (p.parent_path() / new_name).string();
+    return sftp_rename(session.sftp(), path.c_str(), new_path.c_str()) == SSH_OK;
+}
+
+bool FileOps::mkdir_local(const std::string& path) {
+    try {
+        fs::create_directory(path);
+        return true;
+    } catch (...) { return false; }
+}
+
+bool FileOps::mkdir_remote(SshSession& session, const std::string& path) {
+    return sftp_mkdir(session.sftp(), path.c_str(), 0755) == SSH_OK;
 }
 
 bool FileOps::copy_remote_to_remote(SshSession& src_session, const std::string& src_path,

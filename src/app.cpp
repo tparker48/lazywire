@@ -19,14 +19,16 @@ using namespace ftxui;
 namespace fs = std::filesystem;
 
 App::App() {
+    start_path_ = fs::current_path().string();
     PaneState ps;
-    ps.pane = std::make_unique<LocalPane>(fs::current_path().string());
+    ps.pane = std::make_unique<LocalPane>(start_path_);
     panes_.push_back(std::move(ps));
 }
 
 App::App(const std::string& user, const std::string& host, const std::string& password) {
+    start_path_ = fs::current_path().string();
     PaneState local;
-    local.pane = std::make_unique<LocalPane>(fs::current_path().string());
+    local.pane = std::make_unique<LocalPane>(start_path_);
     panes_.push_back(std::move(local));
 
     auto sess = std::make_shared<SshSession>(host, user);
@@ -157,6 +159,58 @@ int App::run() {
         }).detach();
     };
 
+    auto run_ops = [&](std::shared_ptr<std::vector<QueuedOp>> ops) {
+        auto saved  = std::make_shared<std::vector<SavedPane>>(save_pane_states());
+        auto errors = std::make_shared<std::string>();
+        start_loading("Executing...",
+            [ops, errors]() {
+                for (const auto& op : *ops) {
+                    bool ok = false;
+                    bool src_r = (op.src_session != nullptr);
+                    bool dst_r = (op.dst_session != nullptr);
+                    if (op.type == QueuedOp::Type::Mkdir) {
+                        ok = src_r ? FileOps::mkdir_remote(*op.src_session, op.src)
+                                   : FileOps::mkdir_local(op.src);
+                    } else if (op.type == QueuedOp::Type::Rename) {
+                        ok = src_r ? FileOps::rename_remote(*op.src_session, op.src, op.dst)
+                                   : FileOps::rename_local(op.src, op.dst);
+                    } else if (op.type == QueuedOp::Type::Delete) {
+                        ok = src_r ? FileOps::delete_remote(*op.src_session, op.src)
+                                   : FileOps::delete_local(op.src);
+                    } else if (!src_r && !dst_r) {
+                        ok = op.type == QueuedOp::Type::Copy
+                            ? FileOps::copy_local(op.src, op.dst)
+                            : FileOps::move_local(op.src, op.dst);
+                    } else if (!src_r && dst_r) {
+                        ok = FileOps::copy_local_to_remote(*op.dst_session, op.src, op.dst);
+                        if (ok && op.type == QueuedOp::Type::Move) FileOps::delete_local(op.src);
+                    } else if (src_r && !dst_r) {
+                        ok = FileOps::copy_remote_to_local(*op.src_session, op.src, op.dst);
+                        if (ok && op.type == QueuedOp::Type::Move) FileOps::delete_remote(*op.src_session, op.src);
+                    } else {
+                        ok = FileOps::copy_remote_to_remote(*op.src_session, op.src, *op.dst_session, op.dst);
+                        if (ok && op.type == QueuedOp::Type::Move) FileOps::delete_remote(*op.src_session, op.src);
+                    }
+                    if (!ok) *errors += "failed: " + op.src + "; ";
+                }
+            },
+            [this, saved, errors, &restore_pane_states]() {
+                if (!errors->empty()) last_error_ = *errors;
+                restore_pane_states(*saved);
+            }
+        );
+    };
+
+    auto queue_or_exec = [&](QueuedOp op) {
+        if (batch_mode_) {
+            op_queue_.push_back(std::move(op));
+        } else {
+            auto ops = std::make_shared<std::vector<QueuedOp>>();
+            ops->push_back(std::move(op));
+            run_ops(ops);
+        }
+    };
+
     static const std::array<Color, 6> kPaneColors = {
         Color::CyanLight, Color::GreenLight, Color::YellowLight,
         Color::MagentaLight, Color::BlueLight, Color::RedLight,
@@ -282,6 +336,12 @@ int App::run() {
                     case QueuedOp::Type::Delete:
                         label = " [DEL]  " + op.src;
                         c = Color::Red; break;
+                    case QueuedOp::Type::Rename:
+                        label = " [REN]  " + op.src + "  \u2192  " + op.dst;
+                        c = Color::Cyan; break;
+                    case QueuedOp::Type::Mkdir:
+                        label = " [MKDIR] " + op.src;
+                        c = Color::Blue; break;
                 }
                 qrows.push_back(text(label) | color(c));
             }
@@ -292,18 +352,22 @@ int App::run() {
         }
 
         PaneState& active_ps = cur_state();
+        std::string mode_tag = batch_mode_ ? " [BATCH] " : " [IMMEDIATE] ";
+        Color mode_color = batch_mode_ ? Color::Yellow : Color::Green;
         Element status;
         if (active_ps.fuzzy_mode) {
-            status = text("fuzzy: " + active_ps.fuzzy_query);
+            status = hbox({text(mode_tag) | color(mode_color) | bold, text("fuzzy: " + active_ps.fuzzy_query)});
         } else if (!last_error_.empty()) {
-            status = text("ERROR: " + last_error_) | color(Color::Red);
-        } else if (!op_queue_.empty()) {
-            status = text(" Ctrl+R: run  Ctrl+U: clear  ("
-                          + std::to_string(op_queue_.size()) + " pending)") | color(Color::Yellow);
+            status = hbox({text(mode_tag) | color(mode_color) | bold, text("ERROR: " + last_error_) | color(Color::Red)});
+        } else if (batch_mode_ && !op_queue_.empty()) {
+            status = hbox({text(mode_tag) | color(mode_color) | bold,
+                           text(" Ctrl+R: run  Ctrl+U: clear  ("
+                                + std::to_string(op_queue_.size()) + " pending)") | color(Color::Yellow)});
         } else {
-            std::string hint = " y: copy  x: cut  p: paste  D: delete  f: fuzzy  /: jump";
-            hint += "  t: new  T: SSH  Tab: switch  q: close  Q: quit";
-            status = text(hint) | dim;
+            std::string hint = " y: yank  x: cut  p: paste  D: delete  r: rename  m: mkdir  f: fuzzy  /: jump";
+            hint += "  t: new  T: SSH  Tab: switch  S-Tab: " + std::string(batch_mode_ ? "immediate" : "batch");
+            hint += "  q: close  Q: quit";
+            status = hbox({text(mode_tag) | color(mode_color) | bold, text(hint) | dim});
         }
         main_elements.push_back(separator());
         main_elements.push_back(status);
@@ -311,8 +375,7 @@ int App::run() {
         Element base = vbox(std::move(main_elements));
 
         auto show_modal = [](Element modal) -> Element {
-            return vbox({filler(), hbox({filler(), std::move(modal), filler()}), filler()})
-                   | bgcolor(Color::Black) | color(Color::White);
+            return vbox({filler(), hbox({filler(), std::move(modal), filler()}), filler()});
         };
 
         // ── Spinner overlay ───────────────────────────────────────────────
@@ -349,6 +412,49 @@ int App::run() {
             return show_modal(std::move(modal));
         }
 
+        // ── Confirm overlay ───────────────────────────────────────────────
+        if (confirm_overlay_.active) {
+            Element modal = vbox({
+                text(""),
+                text(" " + confirm_overlay_.message + " ") | bold | hcenter,
+                separator(),
+                text(" [y] Yes   [n] No ") | dim | hcenter,
+                text(""),
+            }) | border;
+            return show_modal(std::move(modal));
+        }
+
+        // ── Mkdir overlay ─────────────────────────────────────────────────
+        if (mkdir_overlay_.active) {
+            std::string display = mkdir_overlay_.name + "_";
+            Element modal = vbox({
+                text(""),
+                text(" New Directory ") | bold | hcenter,
+                separator(),
+                hbox({text(" Name : "), text(display) | inverted}),
+                separator(),
+                text(" Enter: confirm   Esc: cancel ") | dim | hcenter,
+                text(""),
+            }) | border;
+            return show_modal(std::move(modal));
+        }
+
+        // ── Rename overlay ────────────────────────────────────────────────
+        if (rename_overlay_.active) {
+            std::string display = rename_overlay_.new_name + "_";
+            Element modal = vbox({
+                text(""),
+                text(" Rename ") | bold | hcenter,
+                separator(),
+                hbox({text(" New name : "), text(display) | inverted}),
+                separator(),
+                text(" Enter: confirm   Esc: cancel ") | dim | hcenter,
+                text(""),
+            }) | border;
+            return show_modal(std::move(modal));
+        }
+
+        screen.SetCursor(Screen::Cursor{0, 0, Screen::Cursor::Hidden});
         return base;
     });
 
@@ -423,6 +529,73 @@ int App::run() {
             if (event.is_character()) {
                 auto& field = overlay_.field == 0 ? overlay_.user_host : overlay_.password;
                 field += event.character();
+                return true;
+            }
+            return true;
+        }
+
+        // ── Confirm overlay ───────────────────────────────────────────────
+        if (confirm_overlay_.active) {
+            if (event == Event::Character('n')) {
+                confirm_overlay_ = {};
+                return true;
+            }
+            if (event == Event::Character('y')) {
+                auto cb = std::move(confirm_overlay_.on_confirm);
+                confirm_overlay_ = {};
+                if (cb) cb();
+                return true;
+            }
+            return true;
+        }
+
+        // ── Mkdir overlay ─────────────────────────────────────────────────
+        if (mkdir_overlay_.active) {
+            if (event == Event::Escape) { mkdir_overlay_ = {}; return true; }
+            if (event == Event::Backspace) {
+                if (!mkdir_overlay_.name.empty()) mkdir_overlay_.name.pop_back();
+                return true;
+            }
+            if (event == Event::Return && !mkdir_overlay_.name.empty()) {
+                std::string parent = mkdir_overlay_.parent_path;
+                std::string name   = mkdir_overlay_.name;
+                bool is_remote     = mkdir_overlay_.is_remote;
+                auto sess          = mkdir_overlay_.session;
+                std::string full   = parent + (parent.back() == '/' ? "" : "/") + name;
+                QueuedOp op;
+                op.type        = QueuedOp::Type::Mkdir;
+                op.src         = full;
+                op.src_session = sess;
+                mkdir_overlay_ = {};
+                queue_or_exec(std::move(op));
+                return true;
+            }
+            if (event.is_character()) {
+                mkdir_overlay_.name += event.character();
+                return true;
+            }
+            return true;
+        }
+
+        // ── Rename overlay ────────────────────────────────────────────────
+        if (rename_overlay_.active) {
+            if (event == Event::Escape) { rename_overlay_ = {}; return true; }
+            if (event == Event::Backspace) {
+                if (!rename_overlay_.new_name.empty()) rename_overlay_.new_name.pop_back();
+                return true;
+            }
+            if (event == Event::Return && !rename_overlay_.new_name.empty()) {
+                QueuedOp op;
+                op.type = QueuedOp::Type::Rename;
+                op.src = rename_overlay_.original_path;
+                op.dst = rename_overlay_.new_name;
+                op.src_session = rename_overlay_.session;
+                rename_overlay_ = {};
+                queue_or_exec(std::move(op));
+                return true;
+            }
+            if (event.is_character()) {
+                rename_overlay_.new_name += event.character();
                 return true;
             }
             return true;
@@ -560,55 +733,35 @@ int App::run() {
             return true;
         }
 
-        // Ctrl+R: execute queue async
+        // Ctrl+R: execute queue (batch mode only)
         if (event == Event::Special("\x12") && !op_queue_.empty()) {
-            auto saved  = std::make_shared<std::vector<SavedPane>>(save_pane_states());
-            auto ops    = std::make_shared<std::vector<QueuedOp>>(std::move(op_queue_));
-            auto errors = std::make_shared<std::string>();
+            auto ops = std::make_shared<std::vector<QueuedOp>>(std::move(op_queue_));
             op_queue_.clear();
-
-            start_loading("Executing...",
-                [ops, errors]() {
-                    for (const auto& op : *ops) {
-                        bool ok = false;
-                        bool src_r = (op.src_session != nullptr);
-                        bool dst_r = (op.dst_session != nullptr);
-                        if (op.type == QueuedOp::Type::Delete) {
-                            ok = src_r ? FileOps::delete_remote(*op.src_session, op.src)
-                                       : FileOps::delete_local(op.src);
-                        } else if (!src_r && !dst_r) {
-                            ok = op.type == QueuedOp::Type::Copy
-                                ? FileOps::copy_local(op.src, op.dst)
-                                : FileOps::move_local(op.src, op.dst);
-                        } else if (!src_r && dst_r) {
-                            ok = FileOps::copy_local_to_remote(*op.dst_session, op.src, op.dst);
-                            if (ok && op.type == QueuedOp::Type::Move) FileOps::delete_local(op.src);
-                        } else if (src_r && !dst_r) {
-                            ok = FileOps::copy_remote_to_local(*op.src_session, op.src, op.dst);
-                            if (ok && op.type == QueuedOp::Type::Move) FileOps::delete_remote(*op.src_session, op.src);
-                        } else {
-                            ok = FileOps::copy_remote_to_remote(*op.src_session, op.src, *op.dst_session, op.dst);
-                            if (ok && op.type == QueuedOp::Type::Move) FileOps::delete_remote(*op.src_session, op.src);
-                        }
-                        if (!ok) *errors += "failed: " + op.src + "; ";
-                    }
-                },
-                [this, saved, errors, &restore_pane_states]() {
-                    if (!errors->empty()) last_error_ = *errors;
-                    restore_pane_states(*saved);
-                }
-            );
+            run_ops(ops);
             return true;
         }
 
         if (event == Event::Character('Q')) { screen.ExitLoopClosure()(); return true; }
+        if (event == Event::TabReverse) { batch_mode_ = !batch_mode_; return true; }
         if (event == Event::Tab) { active_pane_ = (active_pane_ + 1) % (int)panes_.size(); return true; }
 
-        if (event == Event::Character('r')) { cur_pane().refresh(); return true; }
+        if (event == Event::Character('R')) { cur_pane().refresh(); return true; }
+        if (event == Event::Character('r')) {
+            if (n > 0 && p.cursor < n) {
+                const auto& e = entries[p.cursor];
+                rename_overlay_.original_path = e.full_path;
+                rename_overlay_.new_name = e.name;
+                rename_overlay_.is_remote = (p.type() == PaneType::Remote);
+                rename_overlay_.session = rename_overlay_.is_remote
+                    ? static_cast<RemotePane*>(&p)->session_ptr() : nullptr;
+                rename_overlay_.active = true;
+            }
+            return true;
+        }
         if (event == Event::Character('T')) { overlay_ = {}; overlay_.active = true; return true; }
         if (event == Event::Character('t')) {
             PaneState new_ps;
-            new_ps.pane = std::make_unique<LocalPane>(p.current_path);
+            new_ps.pane = std::make_unique<LocalPane>(start_path_);
             panes_.push_back(std::move(new_ps));
             active_pane_ = (int)panes_.size() - 1;
             return true;
@@ -621,23 +774,39 @@ int App::run() {
         }
 
         // ── Clipboard / queue ops ─────────────────────────────────────────
+        auto has_pending_rename = [&](const std::string& path) {
+            for (const auto& op : op_queue_)
+                if (op.type == QueuedOp::Type::Rename && op.src == path) return true;
+            return false;
+        };
+
         if (event == Event::Character('y')) {
             if (n > 0 && p.cursor < n) {
-                clipboard_.op = ClipboardOp::Copy;
-                clipboard_.path = entries[p.cursor].full_path;
-                clipboard_.session = (p.type() == PaneType::Remote)
-                    ? static_cast<RemotePane*>(&p)->session_ptr() : nullptr;
-                clipboard_active_ = true;
+                const std::string& path = entries[p.cursor].full_path;
+                if (has_pending_rename(path)) {
+                    last_error_ = "Cannot yank: pending rename on this file. Execute queue first.";
+                } else {
+                    clipboard_.op = ClipboardOp::Copy;
+                    clipboard_.path = path;
+                    clipboard_.session = (p.type() == PaneType::Remote)
+                        ? static_cast<RemotePane*>(&p)->session_ptr() : nullptr;
+                    clipboard_active_ = true;
+                }
             }
             return true;
         }
         if (event == Event::Character('x')) {
             if (n > 0 && p.cursor < n) {
-                clipboard_.op = ClipboardOp::Cut;
-                clipboard_.path = entries[p.cursor].full_path;
-                clipboard_.session = (p.type() == PaneType::Remote)
-                    ? static_cast<RemotePane*>(&p)->session_ptr() : nullptr;
-                clipboard_active_ = true;
+                const std::string& path = entries[p.cursor].full_path;
+                if (has_pending_rename(path)) {
+                    last_error_ = "Cannot cut: pending rename on this file. Execute queue first.";
+                } else {
+                    clipboard_.op = ClipboardOp::Cut;
+                    clipboard_.path = path;
+                    clipboard_.session = (p.type() == PaneType::Remote)
+                        ? static_cast<RemotePane*>(&p)->session_ptr() : nullptr;
+                    clipboard_active_ = true;
+                }
             }
             return true;
         }
@@ -652,9 +821,30 @@ int App::run() {
                 op.src = clipboard_.path;
                 op.dst = dst;
                 op.src_session = clipboard_.session;
-                op.dst_session = (p.type() == PaneType::Remote)
+                auto dst_session = (p.type() == PaneType::Remote)
                     ? static_cast<RemotePane*>(&p)->session_ptr() : nullptr;
-                op_queue_.push_back(op);
+                op.dst_session = dst_session;
+
+                bool dst_exists = false;
+                if (!dst_session) {
+                    dst_exists = fs::exists(dst);
+                } else {
+                    sftp_attributes attrs = sftp_stat(dst_session->sftp(), dst.c_str());
+                    if (attrs) { dst_exists = true; sftp_attributes_free(attrs); }
+                }
+
+                auto do_paste = [this, &queue_or_exec, op = std::move(op)]() mutable {
+                    queue_or_exec(std::move(op));
+                    clipboard_active_ = false;
+                };
+
+                if (dst_exists) {
+                    confirm_overlay_.message = "Overwrite " + fs::path(dst).filename().string() + "?";
+                    confirm_overlay_.on_confirm = std::move(do_paste);
+                    confirm_overlay_.active = true;
+                } else {
+                    do_paste();
+                }
             }
             return true;
         }
@@ -665,7 +855,11 @@ int App::run() {
                 op.src = entries[p.cursor].full_path;
                 if (p.type() == PaneType::Remote)
                     op.src_session = static_cast<RemotePane*>(&p)->session_ptr();
-                op_queue_.push_back(op);
+                confirm_overlay_.message = "Delete " + entries[p.cursor].name + "?";
+                confirm_overlay_.on_confirm = [this, &queue_or_exec, op = std::move(op)]() mutable {
+                    queue_or_exec(std::move(op));
+                };
+                confirm_overlay_.active = true;
             }
             return true;
         }
@@ -763,8 +957,22 @@ int App::run() {
             );
             return true;
         }
+        if (event == Event::Character('m')) {
+            mkdir_overlay_.parent_path = (n > 0 && p.cursor < n && entries[p.cursor].is_dir)
+                ? entries[p.cursor].full_path : p.current_path;
+            mkdir_overlay_.name.clear();
+            mkdir_overlay_.is_remote = (p.type() == PaneType::Remote);
+            mkdir_overlay_.session = mkdir_overlay_.is_remote
+                ? static_cast<RemotePane*>(&p)->session_ptr() : nullptr;
+            mkdir_overlay_.active = true;
+            return true;
+        }
         if (event == Event::Character('/')) {
             ps.jump_mode = true; ps.jump_query.clear(); ps.jump_match = 0;
+            return true;
+        }
+        if (event == Event::Escape && clipboard_active_) {
+            clipboard_active_ = false;
             return true;
         }
         return false;

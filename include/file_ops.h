@@ -25,6 +25,8 @@ public:
     static bool copy_local_to_remote(SshSession& session, const std::string& local, const std::string& remote);
     static bool delete_remote(SshSession& session, const std::string& path);
     static bool rename_remote(SshSession& session, const std::string& path, const std::string& new_name);
+    static bool mkdir_local(const std::string& path);
+    static bool mkdir_remote(SshSession& session, const std::string& path);
 
     // Cross-remote (local as intermediary)
     static bool copy_remote_to_remote(SshSession& src_session, const std::string& src_path,
