@@ -78,8 +78,8 @@ int App::run() {
             if (!op.dst.empty() && fs::path(op.dst).parent_path().string() == path)
                 return 6;
         }
-        if (clipboard_active_ && clipboard_.path == path)
-            return clipboard_.op == ClipboardOp::Copy ? 4 : 5;
+        for (const auto& cb : clipboard_)
+            if (cb.path == path) return cb.op == ClipboardOp::Copy ? 4 : 5;
         return 0;
     };
 
@@ -252,13 +252,11 @@ int App::run() {
                     std::string indent(e.depth * 2, ' ');
                     std::string icon = e.is_dir ? (e.expanded ? "v " : "> ") : "  ";
                     auto row = text(indent + icon + e.name);
+                    int tag = path_tag(e.full_path);
                     if (i == p.cursor) {
-                        bool is_paste_target = clipboard_active_ && e.is_dir;
-                        row = is_paste_target
-                            ? row | inverted | color(Color::Cyan)
-                            : row | inverted;
+                        row = tag != 0 ? row | inverted | bold : row | inverted;
                     } else {
-                        switch (path_tag(e.full_path)) {
+                        switch (tag) {
                             case 1: row = row | color(Color::Black) | bgcolor(Color::Green);       break;
                             case 2: row = row | color(Color::Black) | bgcolor(Color::Yellow);      break;
                             case 3: row = row | color(Color::White) | bgcolor(Color::Red);         break;
@@ -352,22 +350,27 @@ int App::run() {
         }
 
         PaneState& active_ps = cur_state();
-        std::string mode_tag = batch_mode_ ? " [BATCH] " : " [IMMEDIATE] ";
-        Color mode_color = batch_mode_ ? Color::Yellow : Color::Green;
+        Element mode_el = batch_mode_ ? (text(" [BATCH] ") | color(Color::Yellow) | bold) : text("");
         Element status;
         if (active_ps.fuzzy_mode) {
-            status = hbox({text(mode_tag) | color(mode_color) | bold, text("fuzzy: " + active_ps.fuzzy_query)});
+            status = hbox({mode_el, text("fuzzy: " + active_ps.fuzzy_query)});
         } else if (!last_error_.empty()) {
-            status = hbox({text(mode_tag) | color(mode_color) | bold, text("ERROR: " + last_error_) | color(Color::Red)});
+            status = hbox({mode_el, text("ERROR: " + last_error_) | color(Color::Red)});
         } else if (batch_mode_ && !op_queue_.empty()) {
-            status = hbox({text(mode_tag) | color(mode_color) | bold,
-                           text(" Ctrl+R: run  Ctrl+U: clear  ("
+            status = hbox({mode_el,
+                           text(" Ctrl+E: run  Ctrl+U: clear  ("
                                 + std::to_string(op_queue_.size()) + " pending)") | color(Color::Yellow)});
         } else {
-            std::string hint = " y: yank  x: cut  p: paste  D: delete  r: rename  m: mkdir  f: fuzzy  /: jump";
-            hint += "  t: new  T: SSH  Tab: switch  S-Tab: " + std::string(batch_mode_ ? "immediate" : "batch");
-            hint += "  q: close  Q: quit";
-            status = hbox({text(mode_tag) | color(mode_color) | bold, text(hint) | dim});
+            std::string hint = " y: yank  Y: add yank  x: cut  p: paste  d: delete  r: rename  m: mkdir  f: fuzzy  /: jump";
+            hint += "  t: new  T: SSH  Tab: switch  S-Tab: toggle batch mode";
+            hint += "  q: close  Q: quit  ?: help";
+            int mode_w = batch_mode_ ? 9 : 0;
+            int available = Terminal::Size().dimx - mode_w;
+            if ((int)hint.size() <= available) {
+                status = hbox({mode_el, text(hint) | dim});
+            } else {
+                status = hbox({mode_el, text(" ?: help") | dim});
+            }
         }
         main_elements.push_back(separator());
         main_elements.push_back(status);
@@ -454,6 +457,44 @@ int App::run() {
             return show_modal(std::move(modal));
         }
 
+        // ── Help overlay ──────────────────────────────────────────────────
+        if (help_active_) {
+            auto row = [](std::string key, std::string desc) {
+                return hbox({text(" " + key) | bold | size(WIDTH, EQUAL, 12), text(desc) | dim});
+            };
+            Element modal = vbox({
+                text(" Keybindings ") | bold | hcenter,
+                separator(),
+                row("y",        "Yank (copy, clears previous)"),
+                row("Y",        "Add to yank list"),
+                row("x",        "Cut"),
+                row("p",        "Paste"),
+                row("d",        "Delete"),
+                row("r",        "Rename"),
+                row("m",        "New directory"),
+                separator(),
+                row("f",        "Fuzzy find in current dir"),
+                row("/",        "Jump to path"),
+                separator(),
+                row("h/j/k/l",  "Navigate (or arrow keys)"),
+                row("Space",    "Expand / collapse folder"),
+                row("Tab",      "Switch pane"),
+                row("S-Tab",    "Toggle batch mode"),
+                row("Ctrl+E",   "Execute batch queue"),
+                row("Ctrl+U",   "Clear batch queue"),
+                row("Ctrl+R",   "Refresh pane"),
+                separator(),
+                row("t",        "New local pane (start dir)"),
+                row("T",        "New SSH pane"),
+                row("q",        "Close pane"),
+                row("Q",        "Quit"),
+                row("R",        "Refresh pane"),
+                separator(),
+                text(" any key to close ") | dim | hcenter,
+            }) | border;
+            return show_modal(std::move(modal));
+        }
+
         screen.SetCursor(Screen::Cursor{0, 0, Screen::Cursor::Hidden});
         return base;
     });
@@ -483,6 +524,9 @@ int App::run() {
             }
             return true;
         }
+
+        // ── Help overlay ──────────────────────────────────────────────────
+        if (help_active_) { help_active_ = false; return true; }
 
         // ── Connect overlay ───────────────────────────────────────────────
         if (overlay_.active) {
@@ -729,12 +773,15 @@ int App::run() {
 
         // Ctrl+U: clear queue and yank
         if (event == Event::Special("\x15")) {
-            op_queue_.clear(); clipboard_active_ = false;
+            op_queue_.clear(); clipboard_.clear();
             return true;
         }
 
-        // Ctrl+R: execute queue (batch mode only)
-        if (event == Event::Special("\x12") && !op_queue_.empty()) {
+        // Ctrl+R: refresh active pane
+        if (event == Event::Special("\x12")) { cur_pane().refresh(); return true; }
+
+        // Ctrl+E: execute queue (batch mode only)
+        if (event == Event::Special("\x05") && !op_queue_.empty()) {
             auto ops = std::make_shared<std::vector<QueuedOp>>(std::move(op_queue_));
             op_queue_.clear();
             run_ops(ops);
@@ -745,7 +792,7 @@ int App::run() {
         if (event == Event::TabReverse) { batch_mode_ = !batch_mode_; return true; }
         if (event == Event::Tab) { active_pane_ = (active_pane_ + 1) % (int)panes_.size(); return true; }
 
-        if (event == Event::Character('R')) { cur_pane().refresh(); return true; }
+        if (event == Event::Character('?')) { help_active_ = true; return true; }
         if (event == Event::Character('r')) {
             if (n > 0 && p.cursor < n) {
                 const auto& e = entries[p.cursor];
@@ -780,17 +827,22 @@ int App::run() {
             return false;
         };
 
-        if (event == Event::Character('y')) {
+        if (event == Event::Character('y') || event == Event::Character('Y')) {
             if (n > 0 && p.cursor < n) {
                 const std::string& path = entries[p.cursor].full_path;
                 if (has_pending_rename(path)) {
                     last_error_ = "Cannot yank: pending rename on this file. Execute queue first.";
                 } else {
-                    clipboard_.op = ClipboardOp::Copy;
-                    clipboard_.path = path;
-                    clipboard_.session = (p.type() == PaneType::Remote)
+                    ClipboardEntry cb;
+                    cb.op = ClipboardOp::Copy;
+                    cb.path = path;
+                    cb.session = (p.type() == PaneType::Remote)
                         ? static_cast<RemotePane*>(&p)->session_ptr() : nullptr;
-                    clipboard_active_ = true;
+                    if (event == Event::Character('y')) clipboard_.clear();
+                    // avoid duplicates
+                    bool already = false;
+                    for (const auto& e : clipboard_) if (e.path == path) { already = true; break; }
+                    if (!already) clipboard_.push_back(std::move(cb));
                 }
             }
             return true;
@@ -801,54 +853,69 @@ int App::run() {
                 if (has_pending_rename(path)) {
                     last_error_ = "Cannot cut: pending rename on this file. Execute queue first.";
                 } else {
-                    clipboard_.op = ClipboardOp::Cut;
-                    clipboard_.path = path;
-                    clipboard_.session = (p.type() == PaneType::Remote)
+                    ClipboardEntry cb;
+                    cb.op = ClipboardOp::Cut;
+                    cb.path = path;
+                    cb.session = (p.type() == PaneType::Remote)
                         ? static_cast<RemotePane*>(&p)->session_ptr() : nullptr;
-                    clipboard_active_ = true;
+                    clipboard_.clear();
+                    clipboard_.push_back(std::move(cb));
                 }
             }
             return true;
         }
         if (event == Event::Character('p')) {
-            if (clipboard_active_) {
-                fs::path src_path(clipboard_.path);
+            if (!clipboard_.empty()) {
                 std::string dest_dir = (n > 0 && p.cursor < n && entries[p.cursor].is_dir)
                     ? entries[p.cursor].full_path : p.current_path;
-                std::string dst = (fs::path(dest_dir) / src_path.filename()).string();
-                QueuedOp op;
-                op.type = clipboard_.op == ClipboardOp::Copy ? QueuedOp::Type::Copy : QueuedOp::Type::Move;
-                op.src = clipboard_.path;
-                op.dst = dst;
-                op.src_session = clipboard_.session;
                 auto dst_session = (p.type() == PaneType::Remote)
                     ? static_cast<RemotePane*>(&p)->session_ptr() : nullptr;
-                op.dst_session = dst_session;
 
-                bool dst_exists = false;
-                if (!dst_session) {
-                    dst_exists = fs::exists(dst);
-                } else {
-                    sftp_attributes attrs = sftp_stat(dst_session->sftp(), dst.c_str());
-                    if (attrs) { dst_exists = true; sftp_attributes_free(attrs); }
+                bool is_multi = clipboard_.size() > 1;
+
+                // Build all ops
+                std::vector<QueuedOp> ops;
+                for (const auto& cb : clipboard_) {
+                    fs::path src_path(cb.path);
+                    std::string dst = (fs::path(dest_dir) / src_path.filename()).string();
+                    QueuedOp op;
+                    op.type = cb.op == ClipboardOp::Copy ? QueuedOp::Type::Copy : QueuedOp::Type::Move;
+                    op.src = cb.path;
+                    op.dst = dst;
+                    op.src_session = cb.session;
+                    op.dst_session = dst_session;
+                    ops.push_back(std::move(op));
                 }
 
-                auto do_paste = [this, &queue_or_exec, op = std::move(op)]() mutable {
-                    queue_or_exec(std::move(op));
-                    clipboard_active_ = false;
+                auto do_paste = [this, &queue_or_exec, ops = std::move(ops)]() mutable {
+                    for (auto& op : ops) queue_or_exec(std::move(op));
+                    clipboard_.clear();
                 };
 
-                if (dst_exists) {
-                    confirm_overlay_.message = "Overwrite " + fs::path(dst).filename().string() + "?";
-                    confirm_overlay_.on_confirm = std::move(do_paste);
-                    confirm_overlay_.active = true;
+                if (!is_multi) {
+                    // Single item: check for overwrite
+                    const std::string& dst = ops[0].dst;
+                    bool dst_exists = false;
+                    if (!dst_session) {
+                        dst_exists = fs::exists(dst);
+                    } else {
+                        sftp_attributes attrs = sftp_stat(dst_session->sftp(), dst.c_str());
+                        if (attrs) { dst_exists = true; sftp_attributes_free(attrs); }
+                    }
+                    if (dst_exists) {
+                        confirm_overlay_.message = "Overwrite " + fs::path(dst).filename().string() + "?";
+                        confirm_overlay_.on_confirm = std::move(do_paste);
+                        confirm_overlay_.active = true;
+                    } else {
+                        do_paste();
+                    }
                 } else {
                     do_paste();
                 }
             }
             return true;
         }
-        if (event == Event::Character('D')) {
+        if (event == Event::Character('d')) {
             if (n > 0 && p.cursor < n) {
                 QueuedOp op;
                 op.type = QueuedOp::Type::Delete;
@@ -971,8 +1038,8 @@ int App::run() {
             ps.jump_mode = true; ps.jump_query.clear(); ps.jump_match = 0;
             return true;
         }
-        if (event == Event::Escape && clipboard_active_) {
-            clipboard_active_ = false;
+        if (event == Event::Escape && !clipboard_.empty()) {
+            clipboard_.clear();
             return true;
         }
         return false;

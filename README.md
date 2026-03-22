@@ -36,14 +36,40 @@ Press `f` to fuzzy search recursively within the currently open directory.
 
 | Key | Action |
 |-----|--------|
-| `y` | Yank (copy) |
+| `y` | Yank (copy) — clears any previous yank |
+| `Y` | Add to yank list (multi-yank) |
 | `x` | Cut |
-| `p` | Paste (into selected folder, or same level if a file is selected) |
-| `D` | Delete |
+| `p` | Paste all yanked items into selected folder (or current dir) |
+| `d` | Delete (confirmation required) |
 | `r` | Rename |
-| `R` | Refresh pane |
+| `m` | New directory |
+| `Esc` | Clear yank selection |
 
-Operations work across panes — copy from local, paste to remote, and vice versa.
+Operations work across panes — yank from local, paste to remote, and vice versa. Multi-yank works across different panes and remotes.
+
+## Pane Management
+
+| Key | Action |
+|-----|--------|
+| `t` | New local pane at launch directory |
+| `T` | New SSH pane |
+| `Tab` | Switch active pane |
+| `q` | Close active pane |
+| `Q` | Quit |
+| `Ctrl+R` | Refresh pane |
+
+## Batch Mode
+
+Press `Shift+Tab` to toggle batch mode. In batch mode, file operations are queued rather than executed immediately — useful for staging a set of changes before committing them.
+
+| Key | Action |
+|-----|--------|
+| `Ctrl+E` | Execute queued operations |
+| `Ctrl+U` | Clear queue |
+
+## Help
+
+Press `?` at any time to show all keybindings. Press any key to close.
 
 ## Installation
 

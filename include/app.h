@@ -69,11 +69,11 @@ private:
     std::vector<PaneState> panes_;
     int active_pane_ = 0;
     std::string start_path_;
-    ClipboardEntry clipboard_;
-    bool clipboard_active_ = false;
+    std::vector<ClipboardEntry> clipboard_;
     std::vector<QueuedOp> op_queue_;
     bool batch_mode_ = false;
     std::string last_error_;
+    bool help_active_ = false;
     ConnectOverlay overlay_;
     RenameOverlay rename_overlay_;
     MkdirOverlay mkdir_overlay_;
