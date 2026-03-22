@@ -44,10 +44,33 @@ Press `f` to fuzzy search recursively within the currently open directory.
 
 Operations work across panes — copy from local, paste to remote, and vice versa.
 
-## Building
+## Installation
+
+### Dependencies
+
+| Dependency | Purpose | Install |
+|------------|---------|---------|
+| `libssh` | SSH/SCP connections | `sudo apt install libssh-dev` |
+| `pkg-config` | Build-time dependency resolution | `sudo apt install pkg-config` |
+| `cmake` (3.15+) | Build system | `sudo apt install cmake` |
+| `g++` / `clang++` | C++17 compiler | `sudo apt install build-essential` |
+| [FTXUI](https://github.com/ArthurSonzogni/FTXUI) | TUI framework | Fetched automatically by CMake |
+
+On Debian/Ubuntu, install everything at once:
+```
+sudo apt install build-essential cmake pkg-config libssh-dev
+```
+
+### Build
 
 ```
-cmake -B build && cmake --build build
+git clone git@github.com:yourusername/lazywire.git
+cd lazywire
+cmake -B build
+cmake --build build
 ```
 
-Requires `libssh`.
+The binary will be at `build/lazywire`. Optionally install it to your PATH:
+```
+sudo cp build/lazywire /usr/local/bin/
+```
